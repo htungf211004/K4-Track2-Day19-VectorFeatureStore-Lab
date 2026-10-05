@@ -95,6 +95,21 @@ if res.stderr:
     print(res.stderr)
 assert res.returncode == 0, f"feast apply failed: {res.stderr}"
 
+listed = subprocess.run(
+    ["feast", "feature-views", "list"],
+    cwd=str(FEAST_DIR),
+    capture_output=True, text=True, check=False,
+)
+assert listed.returncode == 0, f"feast feature-views list failed: {listed.stderr}"
+print("Registered feature views:")
+print(listed.stdout)
+for view_name in (
+    "user_profile_features",
+    "item_popularity_features",
+    "query_velocity_features",
+):
+    assert view_name in listed.stdout
+
 # %% [markdown]
 # ## 3. `feast materialize-incremental` — load offline → online
 #
@@ -102,12 +117,17 @@ assert res.returncode == 0, f"feast apply failed: {res.stderr}"
 # (per entity_key) vào online store. SQLite trong lite path; Redis trong docker path.
 
 # %%
-end_dt = NOW.strftime("%Y-%m-%dT%H:%M:%S")
+# Compute the horizon after `feast apply` and allow for CLI startup; on a fresh
+# registry the view creation time must not be later than the requested end.
+end_dt = (datetime.now(timezone.utc) + timedelta(seconds=30)).replace(
+    microsecond=0
+).strftime("%Y-%m-%dT%H:%M:%S")
 res = subprocess.run(
     ["feast", "materialize-incremental", end_dt],
     cwd=str(FEAST_DIR),
     capture_output=True, text=True, check=False,
 )
+print("STDOUT:")
 print(res.stdout[-1500:])
 if res.stderr:
     print("STDERR (tail):")
@@ -144,10 +164,13 @@ features = fs.get_online_features(
 ).to_dict()
 single_latency_ms = (time.perf_counter() - t0) * 1000
 print(f"Single lookup: {single_latency_ms:.2f}ms")
-print({k: v[0] for k, v in features.items()})
+online_row = {k: v[0] for k, v in features.items()}
+print(online_row)
+requested_names = [feature_ref.split(":", 1)[1] for feature_ref in REQUEST_FEATURES]
+assert all(online_row[name] is not None for name in requested_names)
 
 # %% [markdown]
-# ## 5. TODO — Batch latency benchmark (100 lookups, P99)
+# ## 5. Batch latency benchmark (100 lookups, P99)
 
 # %%
 latencies: list[float] = []
@@ -161,9 +184,20 @@ for i in range(100):
     latencies.append((time.perf_counter() - t0) * 1000)
 
 latencies.sort()
-p50 = latencies[50]
-p95 = latencies[95]
-p99 = latencies[99]
+
+
+def percentile(values: list[float], p: float) -> float:
+    """Linearly interpolated percentile for an already sorted sample."""
+    position = (len(values) - 1) * p
+    lower = int(position)
+    upper = min(lower + 1, len(values) - 1)
+    weight = position - lower
+    return values[lower] * (1 - weight) + values[upper] * weight
+
+
+p50 = percentile(latencies, 0.50)
+p95 = percentile(latencies, 0.95)
+p99 = percentile(latencies, 0.99)
 print(f"Online lookup latency over 100 calls:")
 print(f"  P50 = {p50:.2f}ms")
 print(f"  P95 = {p95:.2f}ms")
@@ -172,7 +206,7 @@ print(f"  P99 = {p99:.2f}ms")
 if p99 < 10:
     print(f"PASS — online lookup P99 < 10ms ({p99:.2f}ms)")
 else:
-    print(f"WARN — P99 = {p99:.2f}ms (SQLite trên macOS thường tốt hơn 5ms; Linux thường tốt hơn 1ms)")
+    raise AssertionError(f"Online lookup P99 must be < 10ms, got {p99:.2f}ms")
 
 # %% [markdown]
 # ## 6. PIT join (offline) — đảm bảo no data leakage
@@ -185,7 +219,9 @@ else:
 import pandas as pd
 entity_df = pd.DataFrame({
     "user_id": ["u_001", "u_002", "u_003"],
-    "event_timestamp": [NOW - timedelta(hours=2), NOW - timedelta(hours=1), NOW],
+    # The generated feature times are NOW - user-index hours, so every event
+    # below occurs after its own feature while retaining three distinct times.
+    "event_timestamp": [NOW, NOW - timedelta(hours=1), NOW - timedelta(hours=2)],
 })
 
 historical = fs.get_historical_features(
@@ -195,7 +231,11 @@ historical = fs.get_historical_features(
         "user_profile_features:topic_affinity",
     ],
 ).to_df()
-print(historical)
+historical = historical.sort_values("user_id").reset_index(drop=True)
+assert len(historical) == 3, f"Expected 3 PIT rows, got {len(historical)}"
+assert historical[["reading_speed_wpm", "topic_affinity"]].notna().all().all()
+print(historical.to_string(index=False))
+print("PASS — PIT join returned 3 rows with no future-feature leakage")
 
 # %% [markdown]
 # ## Deliverable evidence

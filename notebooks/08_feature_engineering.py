@@ -28,6 +28,7 @@
 # %%
 import _setup  # noqa: F401
 import subprocess
+import sys
 import warnings
 from pathlib import Path
 
@@ -96,10 +97,17 @@ for c in ["searches_24h", "searches_7d", "seconds_since_last"]:
 # Đọc cột `gap`: lớn = feature đang *thuộc lòng*, không phải *học*.
 
 # %%
+session_leakage = leakage_experiment(events, "session_id")
+user_leakage = leakage_experiment(events, "user_id")
 print("── key = session_id (cardinality rất cao, ~1 event/nhóm) ──")
-print(leakage_experiment(events, "session_id").round(3).to_string(index=False))
+print(session_leakage.round(3).to_string(index=False))
 print("\n── key = user_id (cardinality thấp hơn, ~45 event/nhóm) ──")
-print(leakage_experiment(events, "user_id").round(3).to_string(index=False))
+print(user_leakage.round(3).to_string(index=False))
+
+session_by_encoding = session_leakage.set_index("encoding")
+assert session_by_encoding.loc["target-naive", "gap"] > 0.30
+assert abs(session_by_encoding.loc["target-in-fold", "gap"]) < 0.10
+print("PASS — target-naive gap > 0.30; target-in-fold gap ≈ 0")
 
 # %% [markdown]
 # `target-naive` trên `session_id` cho **train AUC ≈ 0.99** và **test AUC ≈ 0.52**.
@@ -137,6 +145,9 @@ print(f"dòng bị rò (giá trị ghi SAU nhãn): {leaked_row_fraction(ent, fe)
 print(f"\nAUC với latest-value join        : {auc_lat:.3f}   ← dùng tương lai")
 print(f"AUC với point-in-time join       : {auc_pit:.3f}   ← phục vụ được thật")
 print(f"\n'lift ảo' sẽ mất khi lên production: {auc_lat - auc_pit:+.3f} AUC")
+assert leaked_row_fraction(ent, fe) > 0.50
+assert auc_lat > auc_pit
+print("PASS — latest join leaks future values and inflates offline AUC")
 
 # %% [markdown]
 # Offline báo cáo một con số, production trả lại con số thấp hơn hẳn — và không
@@ -158,7 +169,7 @@ print(f"\n'lift ảo' sẽ mất khi lên production: {auc_lat - auc_pit:+.3f} A
 
 # %%
 repo = ROOT / "app" / "feast_repo_ondemand"
-subprocess.run(["python", str(ROOT / "scripts" / "gen_spend.py")], check=True,
+subprocess.run([sys.executable, str(ROOT / "scripts" / "gen_spend.py")], check=True,
                capture_output=True)
 subprocess.run(["feast", "apply"], cwd=repo, check=True, capture_output=True)
 subprocess.run(["feast", "materialize-incremental", "2027-01-01T00:00:00"],
@@ -182,6 +193,11 @@ out = fs.get_online_features(
 for i in range(3):
     print(f"user={out['user_id'][i]}  avg7d={out['avg_amount_7d'][i]:>12,.0f}  "
           f"ratio={out['amount_vs_avg'][i]:6.2f}  spike={out['is_spike'][i]}")
+
+assert out["user_id"][0] == out["user_id"][1] == "u_000"
+assert out["amount_vs_avg"][0] != out["amount_vs_avg"][1]
+assert out["is_spike"][0] == 0 and out["is_spike"][1] == 1
+print("PASS — cùng user, hai request amount tạo hai amount_vs_avg khác nhau")
 
 # %% [markdown]
 # Hai dòng đầu là **cùng một user, cùng một feature đã lưu** — chỉ khác `amount`

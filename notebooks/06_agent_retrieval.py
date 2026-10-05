@@ -83,27 +83,44 @@ BUDGET = 16
 
 
 def evaluate(agent, label):
-    rec, bal, calls, ms = [], [], [], []
+    rec, bal, docs, calls, ms = [], [], [], [], []
     for q in queries:
         r = agent.answer(q["question"])
         truth, got = set(q["relevant_doc_ids"]), set(r.doc_ids)
         rec.append(len(truth & got) / len(truth))
         a, b = len(set(q["gold_a"]) & got), len(set(q["gold_b"]) & got)
         bal.append(min(a, b) / max(1, max(a, b)))
+        docs.append(len(r.doc_ids))
         calls.append(r.n_calls)
         ms.append(r.latency_ms)
+        assert len(r.doc_ids) <= BUDGET, f"retrieval budget exceeded: {len(r.doc_ids)} > {BUDGET}"
     n = len(queries)
-    print(f"{label:<14}{sum(rec)/n:8.3f}{sum(bal)/n:9.2f}{sum(calls)/n:8.1f}{sum(ms)/n:9.1f}")
-    return sum(rec) / n
+    metrics = {
+        "recall": sum(rec) / n,
+        "balance": sum(bal) / n,
+        "docs": sum(docs) / n,
+        "calls": sum(calls) / n,
+        "latency_ms": sum(ms) / n,
+    }
+    print(f"{label:<20}{metrics['recall']:8.3f}{metrics['balance']:9.2f}"
+          f"{metrics['docs']:7.1f}{metrics['calls']:8.1f}{metrics['latency_ms']:9.1f}")
+    return metrics
 
 
-print(f"{'strategy':<20}{'recall':>8}{'balance':>9}{'calls':>8}{'ms':>9}")
+print(f"retrieval budget: {BUDGET} documents/query")
+print(f"{'strategy':<20}{'recall':>8}{'balance':>9}{'docs':>7}{'calls':>8}{'ms':>9}")
 base = evaluate(Agent(tool, SingleShotPlanner(budget=BUDGET)), "single-shot")
 split = evaluate(Agent(tool, RuleBasedPlanner(budget=BUDGET, use_filters=False)),
                  "agentic (no filter)")
 filt = evaluate(Agent(tool, RuleBasedPlanner(budget=BUDGET, use_filters=True)),
                 "agentic (+filter)")
-print(f"\nΔ recall vs single-shot:  tách câu {split - base:+.3f}   tách + filter {filt - base:+.3f}")
+assert split["recall"] > base["recall"] and split["balance"] > base["balance"]
+assert filt["recall"] < split["recall"], "Inferred topic filters should expose the recall trade-off"
+print(f"\nΔ recall vs single-shot:  tách câu {split['recall'] - base['recall']:+.3f}"
+      f"   tách + filter {filt['recall'] - base['recall']:+.3f}")
+print(f"Δ balance vs single-shot: tách câu {split['balance'] - base['balance']:+.2f}"
+      f"   tách + filter {filt['balance'] - base['balance']:+.2f}")
+print("PASS — agentic improves recall and balance within the same 16-document budget")
 
 # %% [markdown]
 # **Đọc kết quả.** `balance` của single-shot rất thấp: nó gần như chỉ lấy *một*
@@ -178,6 +195,8 @@ print("features   :", ctx["features"] or "(chưa có — chạy NB4 trước)")
 print("affinity   :", ctx["affinity_used"])
 print("tool_args  :", ctx["tool_args"])
 print("doc_ids    :", ctx["doc_ids"][:5], "…")
+assert ctx["features"] and ctx["doc_ids"]
+print("PASS — build_context() combines Feast features with vector-search doc_ids")
 
 # %% [markdown]
 # ## Deliverable evidence

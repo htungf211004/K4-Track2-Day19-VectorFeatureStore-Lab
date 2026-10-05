@@ -88,6 +88,12 @@ for name, pred, qf in cases:
     print(f"{name:<18}{sel:7.1f}{post.recall_against(truth):8.2f}{fann_r:8.2f}"
           f"{post.latency_ms:9.1f}{fann_ms:9.1f}")
 
+narrow = next(row for row in rows if row[0] == "acme AND ≥2026")
+assert narrow[1] < 5.0, f"Expected ~4% selectivity, got {narrow[1]:.1f}%"
+assert narrow[2] < 0.5, f"Post-filter recall should collapse, got {narrow[2]:.2f}"
+assert narrow[3] == 1.0, f"Filtered-ANN must match exact ground truth, got {narrow[3]:.2f}"
+print("PASS — post-filter collapses near 4% selectivity; filtered-ANN recall = 1.00")
+
 # %% [markdown]
 # **Đọc bảng:** filter càng chặt (`sel%` càng nhỏ), post-filter càng sập. Ở
 # `acme AND ≥2026` (~4% corpus) post-filter thường về **0.00** — nó hỏi index
@@ -109,13 +115,18 @@ truths = {q: index.pre_filter(q, pred, k=10).doc_ids for q in QUERIES}
 
 print(f"selectivity = {selectivity(index.docs, pred)*100:.1f}%  của 1000 doc\n")
 print(f"{'fetch_k':>9}{'recall':>9}{'% corpus quét':>16}")
+ladder = []
 for fk in (10, 50, 200, 500, 1000):
     r = sum(index.post_filter(q, pred, k=10, fetch_k=fk).recall_against(truths[q])
             for q in QUERIES) / len(QUERIES)
+    ladder.append((fk, r))
     print(f"{fk:>9}{r:9.2f}{fk/len(index.docs)*100:15.0f}%")
 
 r = sum(index.filtered_ann(q, qf, k=10).recall_against(truths[q]) for q in QUERIES) / len(QUERIES)
 print(f"{'fANN':>9}{r:9.2f}{10/len(index.docs)*100:15.0f}%")
+assert dict(ladder)[500] == 1.0
+assert r == 1.0
+print("PASS — post-filter needs fetch_k=500 (50% corpus); filtered-ANN needs top-10")
 
 # %% [markdown]
 # Recall quay lại 1.00 — nhưng chỉ khi `fetch_k` ≈ **một nửa corpus**. Lúc đó

@@ -15,6 +15,7 @@
 
 # %%
 import _setup  # noqa: F401
+import os
 import statistics
 import subprocess
 import time
@@ -30,13 +31,14 @@ import httpx
 
 # %%
 ROOT = Path(_setup.__file__).resolve().parent.parent
+PORT = int(os.getenv("NB3_API_PORT", "8000"))
 proc = subprocess.Popen(
-    ["uvicorn", "app.main:app", "--port", "8000", "--log-level", "warning"],
+    ["uvicorn", "app.main:app", "--port", str(PORT), "--log-level", "warning"],
     cwd=str(ROOT),
 )
 
 # Đợi server up + warm (Searcher.from_corpus loads embeddings + indexes 1000 docs)
-URL = "http://localhost:8000"
+URL = f"http://localhost:{PORT}"
 for _ in range(60):
     try:
         r = httpx.get(f"{URL}/healthz", timeout=2.0)
@@ -57,7 +59,7 @@ print(httpx.get(f"{URL}/healthz").json())
 r = httpx.get(f"{URL}/search", params={"q": "cloud computing tự động mở rộng", "mode": "hybrid"})
 r.raise_for_status()
 body = r.json()
-print(f"latency_ms: {body['latency_ms']:.1f}")
+print({k: body[k] for k in ("query", "mode", "top_k", "latency_ms")})
 print(f"top-3 hits:")
 for h in body["hits"][:3]:
     print(f"  {h['doc_id']:>14}  score={h['score']:.4f}  {h['title']}")
@@ -77,6 +79,12 @@ import json
 DATA = ROOT / "data"
 golden = [json.loads(l) for l in (DATA / "golden_set.jsonl").open(encoding="utf-8")]
 
+# Warm up the embedding model, vector index, BM25 and RRF path before measuring.
+for q in golden[:10]:
+    r = httpx.get(f"{URL}/search", params={"q": q["query"], "mode": "hybrid"})
+    r.raise_for_status()
+print("Warmup: 10 hybrid queries completed")
+
 
 def percentile(values: list[float], p: float) -> float:
     n = len(values)
@@ -92,6 +100,7 @@ def benchmark_mode(mode: str, reps: int = 2) -> dict[str, float]:
         for q in golden:
             t0 = time.perf_counter()
             r = httpx.get(f"{URL}/search", params={"q": q["query"], "mode": mode})
+            r.raise_for_status()
             wall_latencies.append((time.perf_counter() - t0) * 1000)
             server_latencies.append(r.json()["latency_ms"])
     return {
